@@ -57,6 +57,9 @@ If you discover a security vulnerability within Laravel, please send an e-mail t
 ## License
 
 The Laravel framework is open-sourced software licensed under the [MIT license](https://opensource.org/licenses/MIT).
-=# UASWEBPROLANJUT
-YEY
+## UASWEBPROLANJUT – Cyber SaaS Platform
+UASWEBPROLANJUT is a cyber‑punk SaaS platform built with Laravel 10, MySQL, and a modern Blade‑JS dashboard. It showcases a full CI/CD pipeline, automated Postman collection generation, and a robust REST‑API for product management.
 
+**Author:** M Ishak Amirul Khan  
+**Group / Team:** Solodev  
+**Course:** UAS Web Programming Lanjutan
