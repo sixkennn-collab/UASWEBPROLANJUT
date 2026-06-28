@@ -1,0 +1,250 @@
+name: MERCENARYKING-S CI/CD Pipeline
+
+on:
+  push:
+    branches: [ main ]
+  pull_request:
+    branches: [ main ]
+
+permissions:
+  contents: write
+
+env:
+  PHP_VERSION: '8.2'
+
+jobs:
+  # ═══════════════════════════════════════════════════════════════════════════
+  # STAGE 1: TEST & VALIDATE
+  # ═══════════════════════════════════════════════════════════════════════════
+  test:
+    name: "⚡ Test & Validate API"
+    runs-on: ubuntu-latest
+
+    services:
+      mysql:
+        image: mysql:8.0
+        env:
+          MYSQL_ROOT_PASSWORD: password
+          MYSQL_DATABASE: mercenaryking_test
+        ports:
+          - 3306:3306
+        options: >-
+          --health-cmd="mysqladmin ping --silent"
+          --health-interval=10s
+          --health-timeout=5s
+          --health-retries=3
+
+    steps:
+      # ── Checkout ──────────────────────────────────────────────────────────
+      - name: "📥 Checkout Repository"
+        uses: actions/checkout@v4
+
+      # ── PHP Setup ─────────────────────────────────────────────────────────
+      - name: "🔧 Setup PHP ${{ env.PHP_VERSION }}"
+        uses: shivammathur/setup-php@v2
+        with:
+          php-version: ${{ env.PHP_VERSION }}
+          extensions: mbstring, pdo, pdo_sqlite, pdo_mysql, sqlite3, xml, curl, json, bcmath, zip
+          coverage: none
+          tools: composer:v2
+
+      # ── Composer Cache ────────────────────────────────────────────────────
+      - name: "📦 Cache Composer Dependencies"
+        uses: actions/cache@v4
+        with:
+          path: vendor
+          key: composer-${{ hashFiles('composer.lock') }}
+          restore-keys: composer-
+
+      # ── Install Dependencies ──────────────────────────────────────────────
+      - name: "📦 Install Composer Dependencies"
+        run: composer install --no-interaction --prefer-dist --optimize-autoloader
+
+      # ── Environment Setup ─────────────────────────────────────────────────
+      - name: "🔐 Configure Environment"
+        run: |
+          cp .env.example .env
+          php artisan key:generate --ansi
+          # Override DB config for testing with SQLite in-memory
+          echo "" >> .env
+          echo "DB_CONNECTION=sqlite" >> .env
+          echo "DB_DATABASE=:memory:" >> .env
+
+      # ── Database Migration ────────────────────────────────────────────────
+      - name: "🗄️ Run Migrations"
+        run: php artisan migrate --force --ansi
+        env:
+          DB_CONNECTION: sqlite
+          DB_DATABASE: ":memory:"
+
+      # ── Database Seeding ──────────────────────────────────────────────────
+      - name: "🌱 Seed Database"
+        run: php artisan db:seed --force --ansi
+        env:
+          DB_CONNECTION: sqlite
+          DB_DATABASE: ":memory:"
+
+      # ── Run Test Suite ────────────────────────────────────────────────────
+      - name: "🧪 Run PHPUnit / Pest Tests"
+        run: php artisan test --ansi
+        env:
+          DB_CONNECTION: sqlite
+          DB_DATABASE: ":memory:"
+
+      # ── Validate API Routes ───────────────────────────────────────────────
+      - name: "🔍 Validate API Route Definitions"
+        run: |
+          echo '{"stage":"route_validation","status":"running"}' 
+          ROUTES=$(php artisan route:list --json --path=api 2>&1)
+          if echo "$ROUTES" | grep -q '"uri"'; then
+            ROUTE_COUNT=$(echo "$ROUTES" | php -r "echo count(json_decode(file_get_contents('php://stdin'), true));")
+            echo "{\"stage\":\"route_validation\",\"status\":\"passed\",\"route_count\":$ROUTE_COUNT}"
+          else
+            echo '{"stage":"route_validation","status":"failed","error":"No API routes found"}'
+            exit 1
+          fi
+
+  # ═══════════════════════════════════════════════════════════════════════════
+  # STAGE 2: GENERATE POSTMAN COLLECTION
+  # ═══════════════════════════════════════════════════════════════════════════
+  postman:
+    name: "📬 Generate Postman Collection"
+    runs-on: ubuntu-latest
+    needs: test
+
+    steps:
+      - name: "📥 Checkout Repository"
+        uses: actions/checkout@v4
+
+      - name: "🔧 Setup PHP ${{ env.PHP_VERSION }}"
+        uses: shivammathur/setup-php@v2
+        with:
+          php-version: ${{ env.PHP_VERSION }}
+          extensions: mbstring, pdo, pdo_sqlite, sqlite3, xml, curl, json, bcmath
+          coverage: none
+          tools: composer:v2
+
+      - name: "📦 Cache Composer Dependencies"
+        uses: actions/cache@v4
+        with:
+          path: vendor
+          key: composer-${{ hashFiles('composer.lock') }}
+          restore-keys: composer-
+
+      - name: "📦 Install Composer Dependencies"
+        run: composer install --no-interaction --prefer-dist --optimize-autoloader
+
+      - name: "🔐 Configure Environment"
+        run: |
+          cp .env.example .env
+          php artisan key:generate --ansi
+          echo "" >> .env
+          echo "DB_CONNECTION=sqlite" >> .env
+          echo "DB_DATABASE=:memory:" >> .env
+
+      - name: "🗄️ Run Migrations"
+        run: php artisan migrate --force --ansi
+        env:
+          DB_CONNECTION: sqlite
+          DB_DATABASE: ":memory:"
+
+      # ── Generate Postman Collection ───────────────────────────────────────
+      - name: "📬 Export Postman Collection"
+        run: |
+          php artisan postman:export --ansi
+          echo '{"stage":"postman_export","status":"success"}'
+        env:
+          DB_CONNECTION: sqlite
+          DB_DATABASE: ":memory:"
+
+      # ── Validate Generated File ───────────────────────────────────────────
+      - name: "✅ Validate Postman JSON"
+        run: |
+          FILE="storage/app/postman/mercenaryking.postman.json"
+          if [ ! -f "$FILE" ]; then
+            echo '{"stage":"postman_validate","status":"failed","error":"File not generated"}'
+            exit 1
+          fi
+          # Validate it's proper JSON with required Postman schema
+          php -r "
+            \$json = json_decode(file_get_contents('$FILE'), true);
+            if (!isset(\$json['info']['schema'])) {
+              echo json_encode(['stage'=>'postman_validate','status'=>'failed','error'=>'Missing Postman schema']);
+              exit(1);
+            }
+            echo json_encode([
+              'stage'=>'postman_validate',
+              'status'=>'passed',
+              'collection_name'=>\$json['info']['name'],
+              'item_count'=>count(\$json['item'] ?? []),
+              'file_size_bytes'=>filesize('$FILE')
+            ]);
+          "
+
+      # ── Auto Commit Postman Collection ────────────────────────────────────
+      - name: "📤 Auto Commit Postman Collection"
+        if: github.ref == 'refs/heads/main' && github.event_name == 'push'
+        run: |
+          git config user.name "MercenaryKing CI Bot"
+          git config user.email "ci-bot@mercenaryking.net"
+          git add storage/app/postman/mercenaryking.postman.json
+          if git diff --cached --quiet; then
+            echo '{"stage":"auto_commit","status":"skipped","reason":"No changes detected"}'
+          else
+            git commit -m "ci(api): auto update postman collection"
+            git push
+            echo '{"stage":"auto_commit","status":"committed","message":"Postman collection updated"}'
+          fi
+
+  # ═══════════════════════════════════════════════════════════════════════════
+  # STAGE 3: DEPLOY (SIMULATED)
+  # ═══════════════════════════════════════════════════════════════════════════
+  deploy:
+    name: "🚀 Deploy to Production"
+    runs-on: ubuntu-latest
+    needs: [test, postman]
+    if: github.ref == 'refs/heads/main' && github.event_name == 'push'
+
+    steps:
+      - name: "📥 Checkout Repository"
+        uses: actions/checkout@v4
+
+      - name: "🔧 Setup PHP ${{ env.PHP_VERSION }}"
+        uses: shivammathur/setup-php@v2
+        with:
+          php-version: ${{ env.PHP_VERSION }}
+          extensions: mbstring, pdo, pdo_sqlite, sqlite3, xml, curl, json, bcmath
+          coverage: none
+          tools: composer:v2
+
+      - name: "📦 Install Composer Dependencies"
+        run: composer install --no-interaction --prefer-dist --optimize-autoloader --no-dev
+
+      - name: "🔐 Configure Environment"
+        run: |
+          cp .env.example .env
+          php artisan key:generate --ansi
+          echo "" >> .env
+          echo "DB_CONNECTION=sqlite" >> .env
+          echo "DB_DATABASE=:memory:" >> .env
+
+      # ── Simulated Deployment ──────────────────────────────────────────────
+      - name: "🚀 Run Deployment Script (Dry Run)"
+        run: |
+          chmod +x deploy.sh
+          bash deploy.sh --dry-run
+        env:
+          DB_CONNECTION: sqlite
+          DB_DATABASE: ":memory:"
+
+      - name: "📊 Deployment Report"
+        run: |
+          echo '{'
+          echo '  "stage": "deploy",'
+          echo '  "status": "success",'
+          echo '  "mode": "dry-run",'
+          echo '  "commit": "${{ github.sha }}",'
+          echo '  "branch": "${{ github.ref_name }}",'
+          echo '  "triggered_by": "${{ github.actor }}",'
+          echo '  "timestamp": "'$(date -u +%Y-%m-%dT%H:%M:%SZ)'"'
+          echo '}'
